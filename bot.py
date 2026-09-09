@@ -1,22 +1,30 @@
-import os
-import asyncio
 import logging
+import os
 import sqlite3
-import token
+import threading
 import requests
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.error import NetworkError, TimedOut
+from telegram.error import TimedOut
 
-TELGRAM_BOT_TOKEN = "8989457020:AAGMJOGKQGDFAzqgUbvl-Tp7SHzSB5pPFT4"
 CHECK_INTERVAL_SECONDS = 60
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health_check():
+    return 'Vinted Bot is live!', 200
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port)
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Logs errors and gracefully handles network drops without crashing."""
     if isinstance(context.error, (MemoryError, TimedOut)):
         logging.warning(f"Temporary network issue: {context.error}. Retrying automatically...")
     else:
@@ -25,7 +33,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def init_db():
     conn = sqlite3.connect("vinted_monitor.db")
     cursor = conn.cursor()
-    cursor.execute ("""
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS queries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         query TEXT UNIQUE,
@@ -42,10 +50,12 @@ def init_db():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "Welcome Jessica, to your Vinted Deals Bot!**\n\n"
+        "Welcome to your Vinted Deals Bot!**\n\n"
         "To add a search query, type:\n"
-        "`/add_query <search_term> <max_price>`\n"
+        "`/add <item_name>, <max_price>`\n"
         "Example: `/add New Balance 530, 10`\n\n"
+        "To edit an existing query, type:\n"
+        "`/edit <old_name> > <new_name>, <max_price>`\n\n"
         "To view or delete your current searches, type:\n"
         "`/list`"
     )
@@ -98,10 +108,11 @@ async def list_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("Delete", callback_data=f"delete_{item_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
-            f"**Query:** {query.title()}\n**Max Price:** €{max_price: .2f}",
+            f"<b>Query:</b> {query.title()}\n<b>Max Price:</b> €{max_price:.2f}",
             reply_markup=reply_markup,
             parse_mode="HTML"
         )
+
 async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args)
     if "," not in text:
@@ -142,38 +153,15 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    data = query.data
-
     if query.data.startswith("delete_"):
-        item_id = data.replace("delete_", "")
         row_id = query.data.split("_")[1]
         conn = sqlite3.connect("vinted_monitor.db")
-        cursor = conn.cursor ()
+        cursor = conn.cursor()
         cursor.execute("DELETE FROM queries WHERE id = ?", (row_id,))
         conn.commit()
         conn.close()
 
         await query.edit_message_text("Search deleted successfully.")
-
-async def button_callback_handler(update, context):
-    query = update.callback_query
-    # Always acknowledge the button click first so Telegram releases the UI spinner
-    await query.answer()
-
-    data = query.data  # e.g., "delete_Nike"
-
-    if data.startswith("delete_"):
-        search_term = data.replace("delete_", "")
-
-        # 1. Delete from SQLite database
-        conn = sqlite3.connect("vinted_monitor.db")
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM searches WHERE query = ?", (search_term,))
-        conn.commit()
-        conn.close()
-
-        # 2. Update the Telegram message to confirm deletion
-        await query.edit_message_text(text=f"✅ Removed **{search_term}** from your list.")
 
 def fetch_vinted_items(query, max_price):
     session = requests.Session()
@@ -200,7 +188,6 @@ def fetch_vinted_items(query, max_price):
         logging.error(f"Error fetching Vinted data: {e}")
 
     return []
-
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
@@ -255,7 +242,6 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
     conn.close()
 
-
 def main():
     init_db()
 
@@ -263,13 +249,6 @@ def main():
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable is missing!")
 
-    app = (
-      Application.builder()
-      .token(token)
-      .connect_timeout(30.0)
-      .read_timeout(30.0)
-      .build()
-  )
     app = (
         Application.builder()
         .token(token)
@@ -283,14 +262,15 @@ def main():
     app.add_handler(CommandHandler("list", list_queries))
     app.add_handler(CommandHandler("edit", edit_query))
     app.add_handler(CallbackQueryHandler(button_click))
-    app.add_handler(CallbackQueryHandler(button_callback_handler))
     app.add_error_handler(error_handler)
     
     app.job_queue.run_repeating(monitor_job, interval=180, first=10, chat_id=1656101417)
     
+    threading.Thread(target=run_flask, daemon=True).start()
+    
     print("Bot is running...")
     app.run_polling()
 
-
 if __name__ == "__main__":
     main()
+    
