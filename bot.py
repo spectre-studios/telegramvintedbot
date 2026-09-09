@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import sqlite3
+import token
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -257,9 +258,21 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise ValueError("TELEGRAM_BOT_TOKEN environment variable is missing!")
+
+    app = (
+      Application.builder()
+      .token(token)
+      .connect_timeout(30.0)
+      .read_timeout(30.0)
+      .build()
+  )
     app = (
         Application.builder()
-        .token("8989457020:AAGMJOGKQGDFAzqgUbvl-Tp7SHzSB5pPFT4")
+        .token(token)
         .connect_timeout(30.0)
         .read_timeout(30.0)
         .build()
