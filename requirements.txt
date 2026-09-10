@@ -7,5 +7,6 @@ h11
 httpcore
 httpx
 idna
+python-dotenv
 python-telegram-bot
 requests
