@@ -15,14 +15,24 @@ load_dotenv()
 
 CHECK_INTERVAL_SECONDS = 180
 
-raw_users = os.getenv("TELEGRAM_CHAT_ID", "1656101417,8381946664")
-ALLOWED_USERS = [int(uid.strip()) for uid in raw_users.replace(" ", "").split(",") if uid.strip().isdigit()]
+def parse_allowed_users(env_var_name: str) -> list[int]:
+    raw_val = os.getenv(env_var_name, "1656101417,8381946664")
+    user_ids = []
+    for item in raw_val.split(","):
+        cleaned = item.strip()
+        if cleaned.lstrip("-").isdigit():
+            user_ids.append(int(cleaned))
+    return list(set(user_ids))
+
+ALLOWED_USERS = parse_allowed_users("TELEGRAM_CHAT_ID")
 
 def restricted(func):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user_id = update.effective_user.id
-        if user_id not in ALLOWED_USERS:
-            logging.warning(f"Unauthorized access denied for User ID: {user_id}")
+        user_id = update.effective_user.id if update.effective_user else None
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        
+        if user_id not in ALLOWED_USERS and chat_id not in ALLOWED_USERS:
+            logging.warning(f"Unauthorized access denied for User ID: {user_id}, Chat ID: {chat_id}")
             if update.message:
                 await update.message.reply_text("⛔ Sorry! This is a private bot.")
             elif update.callback_query:
