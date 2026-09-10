@@ -199,7 +199,6 @@ def fetch_vinted_items(query, max_price):
     session.headers.update(headers)
 
     try:
-        # Establish initial session and retrieve CSRF/session cookies
         home_resp = session.get("https://www.vinted.es/", timeout=10)
         if home_resp.status_code != 200:
             logging.warning(f"Failed to fetch homepage session: {home_resp.status_code}")
@@ -234,7 +233,18 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
             if cursor.fetchone():
                 continue
 
-            title = item.get("title")
+            title = item.get("title", "") or ""
+            description = item.get("description", "") or ""
+            full_text = f"{title} {description}".lower()
+            
+            search_keywords = query.lower().split()
+
+            if not all(kw in full_text for kw in search_keywords):
+                logging.info(f"Skipping unrelated item '{title}' for query '{query}'")
+                cursor.execute("INSERT INTO seen_items (item_id) VALUES (?)", (item_id,))
+                conn.commit()
+                continue
+
             raw_price = item.get("price")
             if isinstance(raw_price, dict):
                 price = float(raw_price.get("amount", 0.0))
@@ -254,22 +264,22 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("View Item", url=item_url)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            for chat_id in ALLOWED_USERS:
+            for user_id in ALLOWED_USERS:
                 if photo_url:
                     await context.bot.send_photo(
-                    chat_id=chat_id, 
-                    photo=photo_url, 
-                    caption=caption, 
-                    reply_markup=reply_markup, 
-                    parse_mode="Markdown"
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=chat_id, 
-                    text=caption, 
-                    reply_markup=reply_markup, 
-                    parse_mode="Markdown"
-                )
+                        chat_id=user_id, 
+                        photo=photo_url, 
+                        caption=caption, 
+                        reply_markup=reply_markup, 
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=user_id, 
+                        text=caption, 
+                        reply_markup=reply_markup, 
+                        parse_mode="Markdown"
+                    )
 
     conn.close()
 
