@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import os
-import sqlite3
 import threading
 import urllib.parse
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from flask import Flask
 import httpx
@@ -14,6 +15,7 @@ from telegram.error import TimedOut, NetworkError
 load_dotenv()
 
 CHECK_INTERVAL_SECONDS = 180
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 def parse_allowed_users(env_var_name: str) -> list[int]:
     raw_val = os.getenv(env_var_name, "1656101417,8381946664")
@@ -64,22 +66,28 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         logging.error(f"Update {update} caused error {context.error}", exc_info=context.error)
 
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    with sqlite3.connect("vinted_monitor.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS queries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            query TEXT UNIQUE,
-            max_price REAL
-        )
-        """)
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS seen_items (
-            item_id TEXT PRIMARY KEY
-        )
-        """)
-        conn.commit()
+    if not DATABASE_URL:
+        logging.error("DATABASE_URL environment variable missing!")
+        return
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS queries (
+                id SERIAL PRIMARY KEY,
+                query TEXT UNIQUE,
+                max_price REAL
+            )
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS seen_items (
+                item_id TEXT PRIMARY KEY
+            )
+            """)
+            conn.commit()
 
 @restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,24 +160,24 @@ async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query_text = raw_args[0].strip().lower()
         max_price = float(raw_args[1].strip())
 
-        with sqlite3.connect("vinted_monitor.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO queries (query, max_price) VALUES (?, ?)",
-                (query_text, max_price),
-            )
-            conn.commit()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO queries (query, max_price) VALUES (%s, %s) ON CONFLICT (query) DO UPDATE SET max_price = EXCLUDED.max_price",
+                    (query_text, max_price),
+                )
+                conn.commit()
 
         existing_items = await fetch_vinted_items_async(query_text, max_price)
         
-        with sqlite3.connect("vinted_monitor.db") as conn:
-            cursor = conn.cursor()
-            for item in existing_items:
-                if not isinstance(item, dict):
-                    continue
-                item_id = str(item.get("id"))
-                cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
-            conn.commit()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                for item in existing_items:
+                    if not isinstance(item, dict):
+                        continue
+                    item_id = str(item.get("id"))
+                    cursor.execute("INSERT INTO seen_items (item_id) VALUES (%s) ON CONFLICT DO NOTHING", (item_id,))
+                conn.commit()
 
         await update.message.reply_text(
             f"Added search for <b>{query_text.title()}</b> under <b>€{max_price:.2f}</b>",
@@ -183,10 +191,10 @@ async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @restricted
 async def list_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with sqlite3.connect("vinted_monitor.db") as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, query, max_price FROM queries")
-        rows = cursor.fetchall()    
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT id, query, max_price FROM queries")
+            rows = cursor.fetchall()    
 
     if not rows:
         await update.message.reply_text("You have no saved searches. Add one using <code>/add &lt;Item Name&gt;, &lt;Max Price&gt;</code>", parse_mode="HTML")
@@ -220,15 +228,15 @@ async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_query = raw_query
             max_price = float(max_price)
 
-        with sqlite3.connect("vinted_monitor.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM queries WHERE query = ?", (old_query,))
-            if not cursor.fetchone():
-                await update.message.reply_text(f"Could not find an active search matching <b>{old_query.title()}</b>.", parse_mode="HTML")
-                return
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT id FROM queries WHERE query = %s", (old_query,))
+                if not cursor.fetchone():
+                    await update.message.reply_text(f"Could not find an active search matching <b>{old_query.title()}</b>.", parse_mode="HTML")
+                    return
 
-            cursor.execute("UPDATE queries SET query = ?, max_price = ? WHERE query = ?", (new_query, max_price, old_query))
-            conn.commit()
+                cursor.execute("UPDATE queries SET query = %s, max_price = %s WHERE query = %s", (new_query, max_price, old_query))
+                conn.commit()
 
         await update.message.reply_text(f"Updated search: <b>{new_query.title()}</b> with max price <b>€{max_price:.2f}</b>.", parse_mode="HTML")
 
@@ -242,19 +250,19 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("delete_"):
         row_id = query.data.split("_")[1]
-        with sqlite3.connect("vinted_monitor.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM queries WHERE id = ?", (row_id,))
-            conn.commit()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM queries WHERE id = %s", (row_id,))
+                conn.commit()
 
         await query.edit_message_text("Search deleted successfully.")
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        with sqlite3.connect("vinted_monitor.db") as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT query, max_price FROM queries")
-            queries = cursor.fetchall()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT query, max_price FROM queries")
+                queries = cursor.fetchall()
 
         for query, max_price in queries:
             items = await fetch_vinted_items_async(query, max_price)
@@ -267,11 +275,11 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
                 item_id = str(item.get("id"))
                 
-                with sqlite3.connect("vinted_monitor.db") as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT 1 FROM seen_items WHERE item_id = ?", (item_id,))
-                    if cursor.fetchone():
-                        continue
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT 1 FROM seen_items WHERE item_id = %s", (item_id,))
+                        if cursor.fetchone():
+                            continue
 
                 title = item.get("title") or ""
                 description = item.get("description") or ""
@@ -281,10 +289,10 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
                 if not all(kw in full_text for kw in search_keywords):
                     logging.info(f"Skipping unrelated item '{title}' for query '{query}'")
-                    with sqlite3.connect("vinted_monitor.db") as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
-                        conn.commit()
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute("INSERT INTO seen_items (item_id) VALUES (%s) ON CONFLICT DO NOTHING", (item_id,))
+                            conn.commit()
                     continue
 
                 raw_price = item.get("price")
@@ -302,10 +310,10 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                 photos = item.get("photos", [])
                 photo_url = photos[0].get("url") if (photos and isinstance(photos, list) and isinstance(photos[0], dict)) else None
 
-                with sqlite3.connect("vinted_monitor.db") as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
-                    conn.commit()
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("INSERT INTO seen_items (item_id) VALUES (%s) ON CONFLICT DO NOTHING", (item_id,))
+                        conn.commit()
 
                 safe_title = str(title).replace("<", "&lt;").replace(">", "&gt;")
                 caption = f"🚨 <b>NEW ITEM FOUND!</b>\n\n<b>Title:</b> {safe_title}\n<b>Price:</b> €{price:.2f}"
