@@ -11,14 +11,12 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import TimedOut, NetworkError
 
-# Load environment variables from .env file
 load_dotenv()
 
 CHECK_INTERVAL_SECONDS = 180
 
-# Dynamically parse allowed user IDs from .env
-raw_users = os.getenv("TELEGRAM_CHAT_ID", "")
-ALLOWED_USERS = [int(uid.strip()) for uid in raw_users.split(",") if uid.strip().isdigit()]
+raw_users = os.getenv("TELEGRAM_CHAT_ID", "1656101417,8381946664")
+ALLOWED_USERS = [int(uid.strip()) for uid in raw_users.replace(" ", "").split(",") if uid.strip().isdigit()]
 
 def restricted(func):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
@@ -275,7 +273,6 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                     cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
                     conn.commit()
 
-                # Clean item title for HTML safety
                 safe_title = title.replace("<", "&lt;").replace(">", "&gt;")
                 caption = f"🚨 <b>NEW ITEM FOUND!</b>\n\n<b>Title:</b> {safe_title}\n<b>Price:</b> €{price:.2f}"
                 keyboard = [[InlineKeyboardButton("View Item", url=item_url)]]
