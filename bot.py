@@ -1,17 +1,24 @@
+import asyncio
 import logging
 import os
 import sqlite3
 import threading
 import urllib.parse
-import requests
+from dotenv import load_dotenv
 from flask import Flask
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.error import TimedOut
+from telegram.error import TimedOut, NetworkError
+
+# Load environment variables from .env file
+load_dotenv()
 
 CHECK_INTERVAL_SECONDS = 180
 
-ALLOWED_USERS = [1656101417, 8381946664]
+# Dynamically parse allowed user IDs from .env
+raw_users = os.getenv("TELEGRAM_CHAT_ID", "")
+ALLOWED_USERS = [int(uid.strip()) for uid in raw_users.split(",") if uid.strip().isdigit()]
 
 def restricted(func):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
@@ -41,42 +48,77 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=port)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if isinstance(context.error, (MemoryError, TimedOut)):
+    if isinstance(context.error, (MemoryError, TimedOut, NetworkError)):
         logging.warning(f"Temporary network issue: {context.error}. Retrying automatically...")
     else:
         logging.error(f"Update {update} caused error {context.error}", exc_info=context.error)
 
 def init_db():
-    conn = sqlite3.connect("vinted_monitor.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS queries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query TEXT UNIQUE,
-        max_price REAL
-    )
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS seen_items (
-        item_id TEXT PRIMARY KEY
-    )
-    """)
-    conn.commit()
-    conn.close()
+    with sqlite3.connect("vinted_monitor.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS queries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT UNIQUE,
+            max_price REAL
+        )
+        """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS seen_items (
+            item_id TEXT PRIMARY KEY
+        )
+        """)
+        conn.commit()
 
 @restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "Welcome Jess, to your Vinted Deals Bot!\n\n"
+        "Welcome to your Vinted Deals Bot!\n\n"
         "To add a search query, type:\n"
-        "`/add <item_name>, <max_price>`\n"
-        "Example: `/add New Balance 530, 10`\n\n"
+        "<code>/add &lt;item_name&gt;, &lt;max_price&gt;</code>\n"
+        "Example: <code>/add New Balance 530, 10</code>\n\n"
         "To edit an existing query, type:\n"
-        "`/edit <old_name> > <new_name>, <max_price>`\n\n"
+        "<code>/edit &lt;old_name&gt; &gt; &lt;new_name&gt;, &lt;max_price&gt;</code>\n\n"
         "To view or delete your current searches, type:\n"
-        "`/list`"
+        "<code>/list</code>"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    await update.message.reply_text(welcome_text, parse_mode="HTML")
+
+async def fetch_vinted_items_async(query, max_price):
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Referer": "https://www.vinted.es/",
+        "sec-ch-ua": '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+    }
+
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=10.0) as client:
+        try:
+            home_resp = await client.get("https://www.vinted.es/")
+            if home_resp.status_code != 200:
+                logging.warning(f"Failed to fetch homepage session: {home_resp.status_code}")
+
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://www.vinted.es/api/v2/catalog/items?search_text={encoded_query}&price_to={max_price}&order=newest_first"
+            response = await client.get(url)
+
+            logging.info(f"Fetching Vinted items for query '{query}' with max price {max_price}. Status code: {response.status_code}")
+            
+            if response.status_code == 200:
+                return response.json().get("items", [])
+            else:
+                logging.warning(f"Vinted returned status code {response.status_code}")
+
+        except Exception as e:
+            logging.error(f"Error fetching Vinted data: {e}")
+
+    return []
 
 @restricted
 async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -88,39 +130,42 @@ async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query_text = raw_args[0].strip().lower()
         max_price = float(raw_args[1].strip())
 
-        conn = sqlite3.connect("vinted_monitor.db")
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO queries (query, max_price) VALUES (?, ?)",
-            (query_text, max_price),
-        )
-        existing_items = fetch_vinted_items(query_text, max_price)
-        for item in existing_items:
-            item_id = str(item.get("id"))
-            cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect("vinted_monitor.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO queries (query, max_price) VALUES (?, ?)",
+                (query_text, max_price),
+            )
+            conn.commit()
+
+        existing_items = await fetch_vinted_items_async(query_text, max_price)
+        
+        with sqlite3.connect("vinted_monitor.db") as conn:
+            cursor = conn.cursor()
+            for item in existing_items:
+                item_id = str(item.get("id"))
+                cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
+            conn.commit()
 
         await update.message.reply_text(
-            f"Added search for **{query_text.title()}** under **€{max_price:.2f}**",
-            parse_mode="Markdown",
+            f"Added search for <b>{query_text.title()}</b> under <b>€{max_price:.2f}</b>",
+            parse_mode="HTML",
         )
     except Exception:
         await update.message.reply_text(
-            "Format Error! Please use: `/add <Item Name>, <Max Price>`\nExample: `/add Cowboy Hats, 5`",
-            parse_mode="Markdown",
+            "Format Error! Please use: <code>/add &lt;Item Name&gt;, &lt;Max Price&gt;</code>\nExample: <code>/add Cowboy Hats, 5</code>",
+            parse_mode="HTML",
         )
 
 @restricted
 async def list_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect("vinted_monitor.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, query, max_price FROM queries")
-    rows = cursor.fetchall()    
-    conn.close()
+    with sqlite3.connect("vinted_monitor.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, query, max_price FROM queries")
+        rows = cursor.fetchall()    
 
     if not rows:
-        await update.message.reply_text("You have no saved searches. Add one using `/add <Item Name>, <Max Price>`", parse_mode="Markdown")
+        await update.message.reply_text("You have no saved searches. Add one using <code>/add &lt;Item Name&gt;, &lt;Max Price&gt;</code>", parse_mode="HTML")
         return
 
     for item_id, query, max_price in rows:
@@ -136,7 +181,7 @@ async def list_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args)
     if "," not in text:
-        await update.message.reply_text(" Format: `/edit Old Name > New Name, MaxPrice` or `/edit Name, NewMaxPrice`", parse_mode="Markdown")
+        await update.message.reply_text("Format: <code>/edit Old Name &gt; New Name, MaxPrice</code> or <code>/edit Name, NewMaxPrice</code>", parse_mode="HTML")
         return
 
     try:
@@ -151,23 +196,20 @@ async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_query = raw_query
             max_price = float(max_price)
 
-        conn = sqlite3.connect("vinted_monitor.db")
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT id FROM queries WHERE query = ?", (old_query,))
-        if not cursor.fetchone():
-            await update.message.reply_text(f" Could not find an active search matching **{old_query.title()}**.", parse_mode="Markdown")
-            conn.close()
-            return
+        with sqlite3.connect("vinted_monitor.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM queries WHERE query = ?", (old_query,))
+            if not cursor.fetchone():
+                await update.message.reply_text(f"Could not find an active search matching <b>{old_query.title()}</b>.", parse_mode="HTML")
+                return
 
-        cursor.execute("UPDATE queries SET query = ?, max_price = ? WHERE query = ?", (new_query, max_price, old_query))
-        conn.commit()
-        conn.close()
+            cursor.execute("UPDATE queries SET query = ?, max_price = ? WHERE query = ?", (new_query, max_price, old_query))
+            conn.commit()
 
-        await update.message.reply_text(f" Updated search: **{new_query.title()}** with max price **€{max_price:.2f}**.", parse_mode="Markdown")
+        await update.message.reply_text(f"Updated search: <b>{new_query.title()}</b> with max price <b>€{max_price:.2f}</b>.", parse_mode="HTML")
 
     except Exception as e:
-        await update.message.reply_text(f" Error updating query: {e}")
+        await update.message.reply_text(f"Error updating query: {e}")
 
 @restricted
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -176,67 +218,31 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("delete_"):
         row_id = query.data.split("_")[1]
-        conn = sqlite3.connect("vinted_monitor.db")
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM queries WHERE id = ?", (row_id,))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect("vinted_monitor.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM queries WHERE id = ?", (row_id,))
+            conn.commit()
 
         await query.edit_message_text("Search deleted successfully.")
 
-def fetch_vinted_items(query, max_price):
-    session = requests.Session()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Referer": "https://www.vinted.es/",
-    }
-    session.headers.update(headers)
-
-    try:
-        home_resp = session.get("https://www.vinted.es/", timeout=5)
-        if home_resp.status_code != 200:
-            logging.warning(f"Failed to fetch homepage session: {home_resp.status_code}")
-
-        encoded_query = urllib.parse.quote(query)
-        url = f"https://www.vinted.es/api/v2/catalog/items?search_text={encoded_query}&price_to={max_price}&order=newest_first"
-        response = session.get(url, timeout=5)
-
-        logging.info(f"Fetching Vinted items for query '{query}' with max price {max_price}. Status code: {response.status_code}")
-        
-        if response.status_code == 200:
-            return response.json().get("items", [])
-        else:
-            logging.warning(f"Vinted returned status code {response.status_code}")
-
-    except Exception as e:
-        logging.error(f"Error fetching Vinted data: {e}")
-
-    return []
-
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     try:
-        conn = sqlite3.connect("vinted_monitor.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT query, max_price FROM queries")
-        queries = cursor.fetchall()
+        with sqlite3.connect("vinted_monitor.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT query, max_price FROM queries")
+            queries = cursor.fetchall()
 
         for query, max_price in queries:
-            try:
-                items = fetch_vinted_items(query, max_price)
-            except Exception as e:
-                logging.error(f"Error executing fetch for query '{query}': {e}")
-                continue
+            items = await fetch_vinted_items_async(query, max_price)
 
             for item in items:
                 item_id = str(item.get("id"))
-                cursor.execute("SELECT 1 FROM seen_items WHERE item_id = ?", (item_id,))
-                if cursor.fetchone():
-                    continue
+                
+                with sqlite3.connect("vinted_monitor.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1 FROM seen_items WHERE item_id = ?", (item_id,))
+                    if cursor.fetchone():
+                        continue
 
                 title = item.get("title", "") or ""
                 description = item.get("description", "") or ""
@@ -246,8 +252,10 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
                 if not all(kw in full_text for kw in search_keywords):
                     logging.info(f"Skipping unrelated item '{title}' for query '{query}'")
-                    cursor.execute("INSERT INTO seen_items (item_id) VALUES (?)", (item_id,))
-                    conn.commit()
+                    with sqlite3.connect("vinted_monitor.db") as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
+                        conn.commit()
                     continue
 
                 raw_price = item.get("price")
@@ -262,10 +270,14 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                 photos = item.get("photos", [])
                 photo_url = photos[0].get("url") if photos else None
 
-                cursor.execute("INSERT INTO seen_items (item_id) VALUES (?)", (item_id,))
-                conn.commit()
+                with sqlite3.connect("vinted_monitor.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
+                    conn.commit()
 
-                caption = f"🚨 **NEW ITEM FOUND!**\n\n**Title:** {title}\n**Price:** €{price:.2f}"
+                # Clean item title for HTML safety
+                safe_title = title.replace("<", "&lt;").replace(">", "&gt;")
+                caption = f"🚨 <b>NEW ITEM FOUND!</b>\n\n<b>Title:</b> {safe_title}\n<b>Price:</b> €{price:.2f}"
                 keyboard = [[InlineKeyboardButton("View Item", url=item_url)]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -277,19 +289,18 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                                 photo=photo_url, 
                                 caption=caption, 
                                 reply_markup=reply_markup, 
-                                parse_mode="Markdown"
+                                parse_mode="HTML"
                             )
                         else:
                             await context.bot.send_message(
                                 chat_id=user_id, 
                                 text=caption, 
                                 reply_markup=reply_markup, 
-                                parse_mode="Markdown"
+                                parse_mode="HTML"
                             )
                     except Exception as e:
                         logging.error(f"Failed to send alert to user {user_id}: {e}")
 
-        conn.close()
     except Exception as e:
         logging.error(f"Unhandled exception in monitor_job: {e}")
 
@@ -299,6 +310,9 @@ def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable is missing!")
+
+    if not ALLOWED_USERS:
+        logging.warning("No ALLOWED_USERS configured in TELEGRAM_CHAT_ID!")
 
     app = (
         Application.builder()
