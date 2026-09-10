@@ -20,8 +20,11 @@ def parse_allowed_users(env_var_name: str) -> list[int]:
     user_ids = []
     for item in raw_val.split(","):
         cleaned = item.strip()
-        if cleaned.lstrip("-").isdigit():
+        try:
             user_ids.append(int(cleaned))
+        except ValueError:
+            logging.error(f"Failed to parse ID: '{cleaned}' from environment variable.")
+    logging.info(f"Loaded ALLOWED_USERS: {user_ids}")
     return list(set(user_ids))
 
 ALLOWED_USERS = parse_allowed_users("TELEGRAM_CHAT_ID")
@@ -32,7 +35,7 @@ def restricted(func):
         chat_id = update.effective_chat.id if update.effective_chat else None
         
         if user_id not in ALLOWED_USERS and chat_id not in ALLOWED_USERS:
-            logging.warning(f"Unauthorized access denied for User ID: {user_id}, Chat ID: {chat_id}")
+            logging.warning(f"Unauthorized access denied. Incoming User ID: {user_id}, Chat ID: {chat_id}. Allowed: {ALLOWED_USERS}")
             if update.message:
                 await update.message.reply_text("⛔ Sorry! This is a private bot.")
             elif update.callback_query:
@@ -92,8 +95,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML")
 
-async def fetch_vinted_items_async(query, max_price):
-    headers = {
+vinted_client = httpx.AsyncClient(
+    headers={
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -104,27 +107,38 @@ async def fetch_vinted_items_async(query, max_price):
         "sec-ch-ua": '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
-    }
+    },
+    follow_redirects=True,
+    timeout=15.0
+)
 
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=10.0) as client:
-        try:
-            home_resp = await client.get("https://www.vinted.es/")
+async def fetch_vinted_items_async(query, max_price):
+    try:
+        if not vinted_client.cookies:
+            home_resp = await vinted_client.get("https://www.vinted.es/")
             if home_resp.status_code != 200:
                 logging.warning(f"Failed to fetch homepage session: {home_resp.status_code}")
+            await asyncio.sleep(2)
 
-            encoded_query = urllib.parse.quote(query)
-            url = f"https://www.vinted.es/api/v2/catalog/items?search_text={encoded_query}&price_to={max_price}&order=newest_first"
-            response = await client.get(url)
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://www.vinted.es/api/v2/catalog/items?search_text={encoded_query}&price_to={max_price}&order=newest_first"
+        response = await vinted_client.get(url)
 
-            logging.info(f"Fetching Vinted items for query '{query}' with max price {max_price}. Status code: {response.status_code}")
-            
-            if response.status_code == 200:
-                return response.json().get("items", [])
-            else:
-                logging.warning(f"Vinted returned status code {response.status_code}")
+        logging.info(f"Fetching Vinted items for query '{query}' with max price {max_price}. Status code: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, dict):
+                return data.get("items", []) or []
+            return []
+        elif response.status_code in (403, 429):
+            logging.warning(f"Vinted blocked or rate limited (Status {response.status_code}). Clearing session cookies...")
+            vinted_client.cookies.clear()
+        else:
+            logging.warning(f"Vinted returned status code {response.status_code}")
 
-        except Exception as e:
-            logging.error(f"Error fetching Vinted data: {e}")
+    except Exception as e:
+        logging.error(f"Error fetching Vinted data: {e}")
 
     return []
 
@@ -151,6 +165,8 @@ async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with sqlite3.connect("vinted_monitor.db") as conn:
             cursor = conn.cursor()
             for item in existing_items:
+                if not isinstance(item, dict):
+                    continue
                 item_id = str(item.get("id"))
                 cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
             conn.commit()
@@ -242,8 +258,13 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
 
         for query, max_price in queries:
             items = await fetch_vinted_items_async(query, max_price)
+            if not items:
+                continue
 
             for item in items:
+                if not isinstance(item, dict):
+                    continue
+
                 item_id = str(item.get("id"))
                 
                 with sqlite3.connect("vinted_monitor.db") as conn:
@@ -252,8 +273,8 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                     if cursor.fetchone():
                         continue
 
-                title = item.get("title", "") or ""
-                description = item.get("description", "") or ""
+                title = item.get("title") or ""
+                description = item.get("description") or ""
                 full_text = f"{title} {description}".lower()
                 
                 search_keywords = query.lower().split()
@@ -270,20 +291,23 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                 if isinstance(raw_price, dict):
                     price = float(raw_price.get("amount", 0.0))
                 elif raw_price is not None:
-                    price = float(raw_price)
+                    try:
+                        price = float(raw_price)
+                    except ValueError:
+                        price = 0.0
                 else:
                     price = 0.0
                 item_url = item.get("url")
                 
                 photos = item.get("photos", [])
-                photo_url = photos[0].get("url") if photos else None
+                photo_url = photos[0].get("url") if (photos and isinstance(photos, list) and isinstance(photos[0], dict)) else None
 
                 with sqlite3.connect("vinted_monitor.db") as conn:
                     cursor = conn.cursor()
                     cursor.execute("INSERT OR IGNORE INTO seen_items (item_id) VALUES (?)", (item_id,))
                     conn.commit()
 
-                safe_title = title.replace("<", "&lt;").replace(">", "&gt;")
+                safe_title = str(title).replace("<", "&lt;").replace(">", "&gt;")
                 caption = f"🚨 <b>NEW ITEM FOUND!</b>\n\n<b>Title:</b> {safe_title}\n<b>Price:</b> €{price:.2f}"
                 keyboard = [[InlineKeyboardButton("View Item", url=item_url)]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
