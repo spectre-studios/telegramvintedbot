@@ -219,7 +219,6 @@ def fetch_vinted_items(query, max_price):
 
     return []
 
-@restricted
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     conn = sqlite3.connect("vinted_monitor.db")
