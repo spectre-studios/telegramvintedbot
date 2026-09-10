@@ -2,18 +2,18 @@ import logging
 import os
 import sqlite3
 import threading
+import urllib.parse
 import requests
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import TimedOut
 
-CHECK_INTERVAL_SECONDS = 60
+CHECK_INTERVAL_SECONDS = 180
 
 ALLOWED_USERS = [1656101417, 8381946664]
 
 def restricted(func):
-    """Decorator to restrict bot commands to allowed user IDs only."""
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
         if user_id not in ALLOWED_USERS:
@@ -67,7 +67,7 @@ def init_db():
 @restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "Welcome Jess, to your Vinted Deals Bot!**\n\n"
+        "Welcome Jess, to your Vinted Deals Bot!\n\n"
         "To add a search query, type:\n"
         "`/add <item_name>, <max_price>`\n"
         "Example: `/add New Balance 530, 10`\n\n"
@@ -77,7 +77,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`/list`"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
-
 
 @restricted
 async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -199,12 +198,13 @@ def fetch_vinted_items(query, max_price):
     session.headers.update(headers)
 
     try:
-        home_resp = session.get("https://www.vinted.es/", timeout=10)
+        home_resp = session.get("https://www.vinted.es/", timeout=5)
         if home_resp.status_code != 200:
             logging.warning(f"Failed to fetch homepage session: {home_resp.status_code}")
 
-        url = f"https://www.vinted.es/api/v2/catalog/items?search_text={query}&price_to={max_price}&order=newest_first"
-        response = session.get(url, timeout=10)
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://www.vinted.es/api/v2/catalog/items?search_text={encoded_query}&price_to={max_price}&order=newest_first"
+        response = session.get(url, timeout=5)
 
         logging.info(f"Fetching Vinted items for query '{query}' with max price {max_price}. Status code: {response.status_code}")
         
@@ -219,69 +219,79 @@ def fetch_vinted_items(query, max_price):
     return []
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.chat_id
-    conn = sqlite3.connect("vinted_monitor.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT query, max_price FROM queries")
-    queries = cursor.fetchall()
+    try:
+        conn = sqlite3.connect("vinted_monitor.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT query, max_price FROM queries")
+        queries = cursor.fetchall()
 
-    for query, max_price in queries:
-        items = fetch_vinted_items(query, max_price)
-        for item in items:
-            item_id = str(item.get("id"))
-            cursor.execute("SELECT 1 FROM seen_items WHERE item_id = ?", (item_id,))
-            if cursor.fetchone():
+        for query, max_price in queries:
+            try:
+                items = fetch_vinted_items(query, max_price)
+            except Exception as e:
+                logging.error(f"Error executing fetch for query '{query}': {e}")
                 continue
 
-            title = item.get("title", "") or ""
-            description = item.get("description", "") or ""
-            full_text = f"{title} {description}".lower()
-            
-            search_keywords = query.lower().split()
+            for item in items:
+                item_id = str(item.get("id"))
+                cursor.execute("SELECT 1 FROM seen_items WHERE item_id = ?", (item_id,))
+                if cursor.fetchone():
+                    continue
 
-            if not all(kw in full_text for kw in search_keywords):
-                logging.info(f"Skipping unrelated item '{title}' for query '{query}'")
+                title = item.get("title", "") or ""
+                description = item.get("description", "") or ""
+                full_text = f"{title} {description}".lower()
+                
+                search_keywords = query.lower().split()
+
+                if not all(kw in full_text for kw in search_keywords):
+                    logging.info(f"Skipping unrelated item '{title}' for query '{query}'")
+                    cursor.execute("INSERT INTO seen_items (item_id) VALUES (?)", (item_id,))
+                    conn.commit()
+                    continue
+
+                raw_price = item.get("price")
+                if isinstance(raw_price, dict):
+                    price = float(raw_price.get("amount", 0.0))
+                elif raw_price is not None:
+                    price = float(raw_price)
+                else:
+                    price = 0.0
+                item_url = item.get("url")
+                
+                photos = item.get("photos", [])
+                photo_url = photos[0].get("url") if photos else None
+
                 cursor.execute("INSERT INTO seen_items (item_id) VALUES (?)", (item_id,))
                 conn.commit()
-                continue
 
-            raw_price = item.get("price")
-            if isinstance(raw_price, dict):
-                price = float(raw_price.get("amount", 0.0))
-            elif raw_price is not None:
-                price = float(raw_price)
-            else:
-                price = 0.0
-            item_url = item.get("url")
-            
-            photos = item.get("photos", [])
-            photo_url = photos[0].get("url") if photos else None
+                caption = f"🚨 **NEW ITEM FOUND!**\n\n**Title:** {title}\n**Price:** €{price:.2f}"
+                keyboard = [[InlineKeyboardButton("View Item", url=item_url)]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
 
-            cursor.execute("INSERT INTO seen_items (item_id) VALUES (?)", (item_id,))
-            conn.commit()
+                for user_id in ALLOWED_USERS:
+                    try:
+                        if photo_url:
+                            await context.bot.send_photo(
+                                chat_id=user_id, 
+                                photo=photo_url, 
+                                caption=caption, 
+                                reply_markup=reply_markup, 
+                                parse_mode="Markdown"
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=user_id, 
+                                text=caption, 
+                                reply_markup=reply_markup, 
+                                parse_mode="Markdown"
+                            )
+                    except Exception as e:
+                        logging.error(f"Failed to send alert to user {user_id}: {e}")
 
-            caption = f"🚨 **NEW ITEM FOUND!**\n\n**Title:** {title}\n**Price:** €{price:.2f}"
-            keyboard = [[InlineKeyboardButton("View Item", url=item_url)]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            for user_id in ALLOWED_USERS:
-                if photo_url:
-                    await context.bot.send_photo(
-                        chat_id=user_id, 
-                        photo=photo_url, 
-                        caption=caption, 
-                        reply_markup=reply_markup, 
-                        parse_mode="Markdown"
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=user_id, 
-                        text=caption, 
-                        reply_markup=reply_markup, 
-                        parse_mode="Markdown"
-                    )
-
-    conn.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Unhandled exception in monitor_job: {e}")
 
 def main():
     init_db()
@@ -305,7 +315,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_click))
     app.add_error_handler(error_handler)
     
-    app.job_queue.run_repeating(monitor_job, interval=180, first=10, chat_id=1656101417)
+    app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL_SECONDS, first=10)
     
     threading.Thread(target=run_flask, daemon=True).start()
     
