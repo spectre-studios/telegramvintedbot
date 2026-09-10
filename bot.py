@@ -50,7 +50,7 @@ def init_db():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
-        "Welcome to your Vinted Deals Bot!**\n\n"
+        "Welcome Jess, to your Vinted Deals Bot!**\n\n"
         "To add a search query, type:\n"
         "`/add <item_name>, <max_price>`\n"
         "Example: `/add New Balance 530, 10`\n\n"
@@ -166,14 +166,22 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def fetch_vinted_items(query, max_price):
     session = requests.Session()
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Referer": "https://www.vinted.es/",
     }
     session.headers.update(headers)
 
     try:
-        session.get("https://www.vinted.es/", timeout=10)
+        # Establish initial session and retrieve CSRF/session cookies
+        home_resp = session.get("https://www.vinted.es/", timeout=10)
+        if home_resp.status_code != 200:
+            logging.warning(f"Failed to fetch homepage session: {home_resp.status_code}")
+
         url = f"https://www.vinted.es/api/v2/catalog/items?search_text={query}&price_to={max_price}&order=newest_first"
         response = session.get(url, timeout=10)
 
@@ -273,4 +281,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
