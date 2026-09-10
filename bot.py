@@ -10,6 +10,22 @@ from telegram.error import TimedOut
 
 CHECK_INTERVAL_SECONDS = 60
 
+ALLOWED_USERS = [1656101417, 8381946664]
+
+def restricted(func):
+    """Decorator to restrict bot commands to allowed user IDs only."""
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id not in ALLOWED_USERS:
+            logging.warning(f"Unauthorized access denied for User ID: {user_id}")
+            if update.message:
+                await update.message.reply_text("⛔ Sorry! This is a private bot.")
+            elif update.callback_query:
+                await update.callback_query.answer("Unauthorized user.", show_alert=True)
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapped
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -48,6 +64,7 @@ def init_db():
     conn.commit()
     conn.close()
 
+@restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "Welcome Jess, to your Vinted Deals Bot!**\n\n"
@@ -61,6 +78,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
+
+@restricted
 async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         raw_args = " ".join(context.args).split(",")
@@ -93,6 +112,7 @@ async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
+@restricted
 async def list_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect("vinted_monitor.db")
     cursor = conn.cursor()
@@ -113,6 +133,7 @@ async def list_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
+@restricted
 async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args)
     if "," not in text:
@@ -149,6 +170,7 @@ async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f" Error updating query: {e}")
 
+@restricted
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -197,6 +219,7 @@ def fetch_vinted_items(query, max_price):
 
     return []
 
+@restricted
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     conn = sqlite3.connect("vinted_monitor.db")
@@ -232,8 +255,9 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
             keyboard = [[InlineKeyboardButton("View Item", url=item_url)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            if photo_url:
-                await context.bot.send_photo(
+            for chat_id in ALLOWED_USERS:
+                if photo_url:
+                    await context.bot.send_photo(
                     chat_id=chat_id, 
                     photo=photo_url, 
                     caption=caption, 
