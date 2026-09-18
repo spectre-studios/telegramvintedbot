@@ -11,3 +11,4 @@ psycopg2-binary
 python-dotenv
 python-telegram-bot
 requests
+vinted-scraper
