@@ -4,13 +4,14 @@ import os
 import threading
 import urllib.parse
 import psycopg2
+from functools import wraps
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from flask import Flask
 import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.error import TimedOut, NetworkError
+from telegram.error import TimedOut, NetworkError 
 
 load_dotenv()
 
@@ -18,7 +19,7 @@ CHECK_INTERVAL_SECONDS = 180
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 def parse_allowed_users(env_var_name: str) -> list[int]:
-    raw_val = os.getenv(env_var_name, "1656101417,8381946664")
+    raw_val = os.getenv(env_var_name, "")
     user_ids = []
     for item in raw_val.split(","):
         cleaned = item.strip()
@@ -32,6 +33,7 @@ def parse_allowed_users(env_var_name: str) -> list[int]:
 ALLOWED_USERS = parse_allowed_users("TELEGRAM_CHAT_ID")
 
 def restricted(func):
+    @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id if update.effective_user else None
         chat_id = update.effective_chat.id if update.effective_chat else None
@@ -139,7 +141,7 @@ async def fetch_vinted_items_async(query, max_price):
             if isinstance(data, dict):
                 return data.get("items", []) or []
             return []
-        elif response.status_code in (403, 429):
+        elif response.status_code in (403, 404, 429):
             logging.warning(f"Vinted blocked or rate limited (Status {response.status_code}). Clearing session cookies...")
             vinted_client.cookies.clear()
         else:
