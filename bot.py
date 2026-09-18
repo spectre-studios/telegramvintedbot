@@ -8,7 +8,7 @@ from functools import wraps
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from flask import Flask
-import httpx
+from vinted_scraper import VintedScraper
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import TimedOut, NetworkError 
@@ -105,27 +105,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML")
 
-vinted_client = httpx.AsyncClient(
-    headers={
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Referer": "https://www.vinted.es/",
-        "sec-ch-ua": '"Not-A.Brand";v="99", "Chromium";v="124", "Google Chrome";v="124"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-    },
-    follow_redirects=True,
-    timeout=15.0
-)
+vinted_client = VintedScraper("https://www.vinted.fr")
+scraper = VintedScraper("https://www.vinted.fr")
 
-async def fetch_vinted_items_async(query, max_price):
+async def fetch_vinted_items_async(query: str, max_price: float):
+    try:
+        params = {
+            "search_text": query,
+            "price_to": max_price,
+            "order": "newest_first"
+        }
+        items = await asyncio.to_thread(scraper.search, params)
+        return items or []
+        
+    except Exception as e:
+        logging.error(f"Error fetching Vinted listings: {e}")
+        return []
+    
     try:
         if not vinted_client.cookies:
-            home_resp = await vinted_client.get("https://www.vinted.es/")
+            home_resp = await vinted_client.get("https://www.vinted.fr")
             if home_resp.status_code != 200:
                 logging.warning(f"Failed to fetch homepage session: {home_resp.status_code}")
             await asyncio.sleep(2)
