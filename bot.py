@@ -7,7 +7,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from flask import Flask
-from vinted_scraper import VintedWrapper
+from vinted_scraper import VintedScraper
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import TimedOut, NetworkError 
@@ -109,7 +109,7 @@ user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 session_cookie = {"access_token_web": vinted_cookie} if vinted_cookie else None
 
-scraper_wrapper = VintedWrapper(
+scraper_wrapper = VintedScraper(
     "https://www.vinted.fr",
     session_cookie=session_cookie,
     user_agent=user_agent
