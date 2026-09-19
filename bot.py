@@ -105,9 +105,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML")
 
+vinted_cookie = os.getenv("VINTED_COOKIE", "")
 vinted_client = VintedScraper("https://www.vinted.fr")
-scraper = VintedScraper("https://www.vinted.fr")
+scraper = VintedScraper(
+    ("https://www.vinted.fr"),
+    cookie=vinted_cookie if vinted_cookie else None
+)
 
+                        
 async def fetch_vinted_items_async(query: str, max_price: float):
     try:
         params = {
