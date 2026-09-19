@@ -2,13 +2,12 @@ import asyncio
 import logging
 import os
 import threading
-import urllib.parse
-import psycopg2
 from functools import wraps
+import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from flask import Flask
-from vinted_scraper import VintedScraper
+from vinted_scraper import VintedWrapper
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import TimedOut, NetworkError 
@@ -106,17 +105,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="HTML")
 
 vinted_cookie = os.getenv("VINTED_COOKIE", "")
-vinted_client = VintedScraper("https://www.vinted.fr")
-scraper = VintedScraper("https://www.vinted.fr")
+scraper_wrapper = VintedWrapper("https://www.vinted.fr")
 if vinted_cookie:
-    scraper.client.headers.update({
+    scraper_wrapper.client.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Cookie": f"access_token_web={vinted_cookie}"
     })
 
-scraper.refresh_session = lambda: None
-
-                        
 async def fetch_vinted_items_async(query: str, max_price: float):
     try:
         params = {
@@ -124,41 +119,12 @@ async def fetch_vinted_items_async(query: str, max_price: float):
             "price_to": max_price,
             "order": "newest_first"
         }
-        items = await asyncio.to_thread(scraper.search, params)
+        items = await asyncio.to_thread(scraper_wrapper.raw_search, params)
         return items or []
         
     except Exception as e:
         logging.error(f"Error fetching Vinted listings: {e}")
         return []
-    
-    try:
-        if not vinted_client.cookies:
-            home_resp = await vinted_client.get("https://www.vinted.fr")
-            if home_resp.status_code != 200:
-                logging.warning(f"Failed to fetch homepage session: {home_resp.status_code}")
-            await asyncio.sleep(2)
-
-        encoded_query = urllib.parse.quote(query)
-        url = f"https://www.vinted.es/api/v2/catalog/items?search_text={encoded_query}&price_to={max_price}&order=newest_first"
-        response = await vinted_client.get(url)
-
-        logging.info(f"Fetching Vinted items for query '{query}' with max price {max_price}. Status code: {response.status_code}")
-        
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, dict):
-                return data.get("items", []) or []
-            return []
-        elif response.status_code in (403, 404, 429):
-            logging.warning(f"Vinted blocked or rate limited (Status {response.status_code}). Clearing session cookies...")
-            vinted_client.cookies.clear()
-        else:
-            logging.warning(f"Vinted returned status code {response.status_code}")
-
-    except Exception as e:
-        logging.error(f"Error fetching Vinted data: {e}")
-
-    return []
 
 @restricted
 async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
