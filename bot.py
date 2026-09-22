@@ -228,14 +228,17 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data.startswith("delete_"):
-        row_id = query.data.split("_")[1]
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("DELETE FROM queries WHERE id = %s", (row_id,))
-                conn.commit()
+    try:
+        if query.data and query.data.startswith("delete_"):
+            row_id = int(query.data.split("_")[1])
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("DELETE FROM queries WHERE id = %s", (row_id,))
+                    conn.commit()
 
-        await query.edit_message_text("Search deleted successfully.")
+            await query.edit_message_text("Search deleted successfully.")
+    except Exception as e:
+        logging.error(f"Error processing callback button: {e}")
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     try:
