@@ -84,14 +84,6 @@ def init_db():
             );
             """)
             cursor.execute("""
-            DO $$ 
-            BEGIN 
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='queries' AND column_name='id') THEN
-                    ALTER TABLE queries ADD COLUMN id SERIAL PRIMARY KEY;
-                END IF;
-            END $$;
-            """)
-            cursor.execute("""
             CREATE TABLE IF NOT EXISTS seen_items (
                 item_id TEXT PRIMARY KEY
             );
@@ -105,9 +97,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "To add a search query, type:\n"
         "<code>/add &lt;item_name&gt;, &lt;max_price&gt;</code>\n"
         "Example: <code>/add New Balance 530, 10</code>\n\n"
+        "To delete a search query, type:\n"
+        "<code>/delete &lt;item_name&gt;</code>\n"
+        "Example: <code>/delete New Balance 530</code>\n\n"
         "To edit an existing query, type:\n"
         "<code>/edit &lt;old_name&gt; &gt; &lt;new_name&gt;, &lt;max_price&gt;</code>\n\n"
-        "To view or delete your current searches, type:\n"
+        "To view your current searches, type:\n"
         "<code>/list</code>"
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML")
@@ -178,25 +173,60 @@ async def add_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 @restricted
+async def delete_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Format: <code>/delete &lt;Item Name&gt;</code> or <code>/delete &lt;Item Name&gt;, &lt;Max Price&gt;</code>\nExample: <code>/delete Le Creuset</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    raw_text = " ".join(context.args)
+    if "," in raw_text:
+        query_text = raw_text.split(",")[0].strip().lower()
+    else:
+        query_text = raw_text.strip().lower()
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT query FROM queries WHERE query = %s", (query_text,))
+                row = cursor.fetchone()
+                if not row:
+                    await update.message.reply_text(
+                        f"Could not find an active search matching <b>{query_text.title()}</b>.",
+                        parse_mode="HTML",
+                    )
+                    return
+
+                cursor.execute("DELETE FROM queries WHERE query = %s", (query_text,))
+                conn.commit()
+
+        await update.message.reply_text(
+            f"🗑️ Deleted search for <b>{query_text.title()}</b> successfully.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logging.error(f"Error in delete_query: {e}")
+        await update.message.reply_text(f"Error deleting search: {e}")
+
+@restricted
 async def list_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
-            cursor.execute("SELECT id, query, max_price FROM queries")
+            cursor.execute("SELECT query, max_price FROM queries")
             rows = cursor.fetchall()    
 
     if not rows:
         await update.message.reply_text("You have no saved searches. Add one using <code>/add &lt;Item Name&gt;, &lt;Max Price&gt;</code>", parse_mode="HTML")
         return
 
-    for item_id, query, max_price in rows:
-        target_id = item_id if item_id is not None else query
-        keyboard = [[InlineKeyboardButton("Delete", callback_data=f"delete_{target_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            f"<b>Query:</b> {query.title()}\n<b>Max Price:</b> €{max_price:.2f}",
-            reply_markup=reply_markup,
-            parse_mode="HTML"
-        )
+    msg = "📋 <b>Your Active Searches:</b>\n\n"
+    for query, max_price in rows:
+        msg += f"• <b>{query.title()}</b> — Max Price: €{max_price:.2f}\n"
+
+    msg += "\nTo delete a search, type:\n<code>/delete &lt;Item Name&gt;</code>\nExample: <code>/delete Le Creuset</code>"
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 @restricted
 async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,30 +261,6 @@ async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"Error updating query: {e}")
-
-@restricted
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query:
-        return
-
-    try:
-        if query.data and query.data.startswith("delete_"):
-            raw_target = query.data.split("delete_", 1)[1]
-            
-            with get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    if raw_target.isdigit():
-                        cursor.execute("DELETE FROM queries WHERE id = %s", (int(raw_target),))
-                    else:
-                        cursor.execute("DELETE FROM queries WHERE query = %s", (raw_target,))
-                    conn.commit()
-
-            await query.answer("Search deleted!")
-            await query.edit_message_text("🗑️ Search deleted successfully.")
-    except Exception as e:
-        logging.error(f"Error processing delete callback: {e}", exc_info=True)
-        await query.answer("Error deleting search. Please try again.", show_alert=True)
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -367,9 +373,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_query))
+    app.add_handler(CommandHandler("delete", delete_query))
     app.add_handler(CommandHandler("list", list_queries))
     app.add_handler(CommandHandler("edit", edit_query))
-    app.add_handler(CallbackQueryHandler(button_click))
     app.add_error_handler(error_handler)
     
     app.job_queue.run_repeating(monitor_job, interval=CHECK_INTERVAL_SECONDS, first=10)
