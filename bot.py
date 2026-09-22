@@ -7,7 +7,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from flask import Flask
-from vinted_scraper import VintedScraper
+from vinted_scraper import VintedWrapper
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import TimedOut, NetworkError 
@@ -105,15 +105,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode="HTML")
 
 vinted_cookie = os.getenv("VINTED_COOKIE", "")
-user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
-session_cookie = {"access_token_web": vinted_cookie} if vinted_cookie else None
-
-scraper_wrapper = VintedScraper(
-    "https://www.vinted.fr",
-    session_cookie=session_cookie,
-    user_agent=user_agent
-)
+scraper_wrapper = VintedWrapper("https://www.vinted.fr")
+if vinted_cookie:
+    scraper_wrapper._client.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Cookie": f"access_token_web={vinted_cookie}"
+    })
 
 async def fetch_vinted_items_async(query: str, max_price: float):
     try:
