@@ -81,12 +81,20 @@ def init_db():
                 id SERIAL PRIMARY KEY,
                 query TEXT UNIQUE,
                 max_price REAL
-            )
+            );
+            """)
+            cursor.execute("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='queries' AND column_name='id') THEN
+                    ALTER TABLE queries ADD COLUMN id SERIAL PRIMARY KEY;
+                END IF;
+            END $$;
             """)
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS seen_items (
                 item_id TEXT PRIMARY KEY
-            )
+            );
             """)
             conn.commit()
 
@@ -181,7 +189,8 @@ async def list_queries(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     for item_id, query, max_price in rows:
-        keyboard = [[InlineKeyboardButton("Delete", callback_data=f"delete_{item_id}")]]
+        target_id = item_id if item_id is not None else query
+        keyboard = [[InlineKeyboardButton("Delete", callback_data=f"delete_{target_id}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
             f"<b>Query:</b> {query.title()}\n<b>Max Price:</b> €{max_price:.2f}",
@@ -226,19 +235,26 @@ async def edit_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @restricted
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    if not query:
+        return
 
     try:
         if query.data and query.data.startswith("delete_"):
-            row_id = int(query.data.split("_")[1])
+            raw_target = query.data.split("delete_", 1)[1]
+            
             with get_db_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("DELETE FROM queries WHERE id = %s", (row_id,))
+                    if raw_target.isdigit():
+                        cursor.execute("DELETE FROM queries WHERE id = %s", (int(raw_target),))
+                    else:
+                        cursor.execute("DELETE FROM queries WHERE query = %s", (raw_target,))
                     conn.commit()
 
-            await query.edit_message_text("Search deleted successfully.")
+            await query.answer("Search deleted!")
+            await query.edit_message_text("🗑️ Search deleted successfully.")
     except Exception as e:
-        logging.error(f"Error processing callback button: {e}")
+        logging.error(f"Error processing delete callback: {e}", exc_info=True)
+        await query.answer("Error deleting search. Please try again.", show_alert=True)
 
 async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
     try:
