@@ -119,8 +119,12 @@ async def fetch_vinted_items_async(query: str, max_price: float):
             "price_to": max_price,
             "order": "newest_first"
         }
-        items = await asyncio.to_thread(scraper_wrapper.raw_search, params)
-        return items or []
+        res = await asyncio.to_thread(scraper_wrapper.search, params)
+        if isinstance(res, dict):
+            return res.get("items", [])
+        elif isinstance(res, list):
+            return res
+        return []
         
     except Exception as e:
         logging.error(f"Error fetching Vinted listings: {e}")
