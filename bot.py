@@ -285,7 +285,12 @@ async def monitor_job(context: ContextTypes.DEFAULT_TYPE):
                         price = 0.0
                 else:
                     price = 0.0
-                item_url = item.get("url")
+
+                item_url = item.get("url") or ""
+                if item_url.startswith("/"):
+                    item_url = f"https://www.vinted.fr{item_url}"
+                elif not item_url.startswith("http"):
+                    item_url = f"https://www.vinted.fr/{item_url.lstrip('/')}"
                 
                 photos = item.get("photos", [])
                 photo_url = photos[0].get("url") if (photos and isinstance(photos, list) and isinstance(photos[0], dict)) else None
@@ -353,7 +358,7 @@ def main():
     threading.Thread(target=run_flask, daemon=True).start()
     
     print("Bot is running...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
